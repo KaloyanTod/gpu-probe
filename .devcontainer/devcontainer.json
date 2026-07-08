@@ -1,0 +1,38 @@
+{
+  "name": "gpu-probe",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+
+  // Vulkan/GL loaders need to find the Mesa software (lavapipe / llvmpipe)
+  // drivers. These are already installed in the image; the env vars make the
+  // loader prefer software rendering so `wgpu` can enumerate an adapter even
+  // on a GPU-less Codespace host.
+  "containerEnv": {
+    "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/lvp_icd.x86_64.json",
+    "LIBGL_ALWAYS_SOFTWARE": "1",
+    "GALLIUM_DRIVER": "llvmpipe",
+    "RUST_BACKTRACE": "1",
+    "CARGO_TERM_COLOR": "always"
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "vadimcn.vscode-lldb",
+        "alexcvzz.vscode-sqlite"
+      ],
+      "settings": {
+        "rust-analyzer.check.command": "clippy"
+      }
+    }
+  },
+
+  // Warm the build cache once the container is created. `|| true` so a failed
+  // compile (e.g. a pinned-dependency hiccup) does not abort container setup.
+  "postCreateCommand": "rustc --version && cargo fetch && cargo build --release || true",
+
+  "remoteUser": "vscode"
+}

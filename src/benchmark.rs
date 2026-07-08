@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use wgpu::util::DeviceExt;
 
+use crate::error::Error;
 use crate::Config;
 
 /// The tiled GEMM shader, compiled into the binary. include_str! guarantees the
@@ -104,6 +105,9 @@ pub struct GpuContext {
     pub adapter_info: wgpu::AdapterInfo,
     /// Whether TIMESTAMP_QUERY was available and requested.
     pub timestamp_supported: bool,
+    /// Human-readable description of every adapter that was enumerated during
+    /// setup. Collected rather than printed so the caller controls output.
+    pub enumerated_adapters: Vec<String>,
 }
 
 pub struct BenchmarkResult {
@@ -116,6 +120,10 @@ pub struct BenchmarkResult {
     pub min_gflops: f64,
     pub run_valid: bool,
     pub input_fingerprint: String,
+    /// Non-fatal warnings collected during the timed run (discarded iterations,
+    /// validity flags). Collected rather than printed so the caller controls
+    /// output. Each message omits any leading `warning:` prefix.
+    pub warnings: Vec<String>,
     /// Inputs and GPU output kept for CPU verification.
     pub a: Vec<f32>,
     pub b: Vec<f32>,
@@ -124,20 +132,23 @@ pub struct BenchmarkResult {
 
 /// Enumerate adapters, request a high-performance one, and REJECT a CPU/software
 /// fallback adapter. A CPU pretending to be a GPU must never produce a score.
-pub fn setup() -> Result<GpuContext, String> {
+pub fn setup() -> Result<GpuContext, Error> {
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
 
-    // Log what is available (useful when a machine reports "no_gpu").
+    // Record what is available (useful when a machine reports "no_gpu"). The
+    // caller decides whether/how to surface this list.
     let all = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
-    eprintln!("Enumerated {} adapter(s):", all.len());
-    for a in &all {
-        let info = a.get_info();
-        eprintln!(
-            "  - {} [{:?}] backend={:?}",
-            info.name, info.device_type, info.backend
-        );
-    }
+    let enumerated_adapters: Vec<String> = all
+        .iter()
+        .map(|a| {
+            let info = a.get_info();
+            format!(
+                "{} [{:?}] backend={:?}",
+                info.name, info.device_type, info.backend
+            )
+        })
+        .collect();
 
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
@@ -145,16 +156,16 @@ pub fn setup() -> Result<GpuContext, String> {
         force_fallback_adapter: false,
         ..Default::default()
     }))
-    .map_err(|e| format!("no_gpu: failed to acquire an adapter: {e}"))?;
+    .map_err(|e| Error::NoGpu(format!("failed to acquire an adapter: {e}")))?;
 
     let info = adapter.get_info();
 
     // Hard reject: a CPU-fallback adapter is not a GPU.
     if info.device_type == wgpu::DeviceType::Cpu {
-        return Err(format!(
-            "no_gpu: only a CPU/software adapter is available ({}); refusing to score a CPU as a GPU.",
+        return Err(Error::NoGpu(format!(
+            "only a CPU/software adapter is available ({}); refusing to score a CPU as a GPU.",
             info.name
-        ));
+        )));
     }
 
     // Detect timestamp-query support. We deliberately do NOT require
@@ -181,13 +192,14 @@ pub fn setup() -> Result<GpuContext, String> {
         trace: wgpu::Trace::Off,
         ..Default::default()
     }))
-    .map_err(|e| format!("no_gpu: failed to create device: {e}"))?;
+    .map_err(|e| Error::NoGpu(format!("failed to create device: {e}")))?;
 
     Ok(GpuContext {
         device,
         queue,
         adapter_info: info,
         timestamp_supported,
+        enumerated_adapters,
     })
 }
 
@@ -345,6 +357,7 @@ pub fn run(ctx: &GpuContext, cfg: &Config) -> BenchmarkResult {
 
     let mut timings_ms: Vec<f64> = Vec::with_capacity(cfg.timed_iters as usize);
     let mut discarded = 0u32;
+    let mut warnings: Vec<String> = Vec::new();
 
     let (timing_method, timestamp_period_ns) = if ctx.timestamp_supported {
         // ---- TIMESTAMP_QUERY path: time the pass on-device. ----
@@ -401,7 +414,7 @@ pub fn run(ctx: &GpuContext, cfg: &Config) -> BenchmarkResult {
             // wrap. Discard rather than report a bogus fast score.
             if elapsed_ms <= 0.0 || t1 < t0 {
                 discarded += 1;
-                eprintln!("warning: discarded iteration (elapsed_ms={elapsed_ms})");
+                warnings.push(format!("discarded iteration (elapsed_ms={elapsed_ms})"));
             } else {
                 timings_ms.push(elapsed_ms);
             }
@@ -421,7 +434,7 @@ pub fn run(ctx: &GpuContext, cfg: &Config) -> BenchmarkResult {
 
             if elapsed_ms <= 0.0 {
                 discarded += 1;
-                eprintln!("warning: discarded iteration (elapsed_ms={elapsed_ms})");
+                warnings.push(format!("discarded iteration (elapsed_ms={elapsed_ms})"));
             } else {
                 timings_ms.push(elapsed_ms);
             }
@@ -464,20 +477,20 @@ pub fn run(ctx: &GpuContext, cfg: &Config) -> BenchmarkResult {
     let mut run_valid = true;
     if timings_ms.is_empty() {
         run_valid = false;
-        eprintln!("warning: no valid timed iterations; marking run invalid.");
+        warnings.push("no valid timed iterations; marking run invalid.".to_string());
     }
     if discarded * 2 > cfg.timed_iters {
         run_valid = false;
-        eprintln!(
-            "warning: discarded {discarded}/{} iterations (>50%); marking run invalid.",
+        warnings.push(format!(
+            "discarded {discarded}/{} iterations (>50%); marking run invalid.",
             cfg.timed_iters
-        );
+        ));
     }
     if min_gflops > SANITY_CEILING_GFLOPS {
         run_valid = false;
-        eprintln!(
-            "warning: min_gflops {min_gflops:.1} exceeds sanity ceiling {SANITY_CEILING_GFLOPS:.1}; marking run invalid."
-        );
+        warnings.push(format!(
+            "min_gflops {min_gflops:.1} exceeds sanity ceiling {SANITY_CEILING_GFLOPS:.1}; marking run invalid."
+        ));
     }
 
     BenchmarkResult {
@@ -490,6 +503,7 @@ pub fn run(ctx: &GpuContext, cfg: &Config) -> BenchmarkResult {
         min_gflops,
         run_valid,
         input_fingerprint: fingerprint,
+        warnings,
         a,
         b,
         c,
@@ -534,4 +548,52 @@ fn readback_c(ctx: &GpuContext, pipe: &Pipeline) -> Vec<f32> {
     drop(data);
     pipe.c_readback.unmap();
     values
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fnv1a_is_stable() {
+        // Known FNV-1a/64 value for the empty input is the offset basis.
+        assert_eq!(fnv1a_64(b""), 0xcbf29ce484222325);
+        // Determinism: same bytes -> same hash.
+        assert_eq!(fnv1a_64(b"gpu-probe"), fnv1a_64(b"gpu-probe"));
+        assert_ne!(fnv1a_64(b"gpu-probe"), fnv1a_64(b"gpu-probf"));
+    }
+
+    #[test]
+    fn to_unit_f32_is_in_range() {
+        // A sweep of states must always map into [-1, 1).
+        let mut state = 1u64;
+        for _ in 0..10_000 {
+            let v = to_unit_f32(splitmix64(&mut state));
+            assert!((-1.0..1.0).contains(&v), "out of range: {v}");
+        }
+    }
+
+    #[test]
+    fn generate_inputs_is_deterministic() {
+        // The same seed must yield bit-identical matrices and fingerprints.
+        let (a1, b1) = generate_inputs(32, 0xDEAD_BEEF);
+        let (a2, b2) = generate_inputs(32, 0xDEAD_BEEF);
+        assert_eq!(a1, a2);
+        assert_eq!(b1, b2);
+        assert_eq!(input_fingerprint(&a1), input_fingerprint(&a2));
+
+        // A different seed must differ.
+        let (a3, _) = generate_inputs(32, 0xDEAD_BEF0);
+        assert_ne!(input_fingerprint(&a1), input_fingerprint(&a3));
+
+        // A precedes B: for a nonzero-seed run the two halves are independent.
+        assert_ne!(a1, b1);
+    }
+
+    #[test]
+    fn generate_inputs_has_expected_length() {
+        let (a, b) = generate_inputs(16, 1);
+        assert_eq!(a.len(), 16 * 16);
+        assert_eq!(b.len(), 16 * 16);
+    }
 }

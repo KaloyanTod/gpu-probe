@@ -80,8 +80,8 @@ pub fn collect(info: &wgpu::AdapterInfo) -> HardwareInfo {
         backend: backend_str(info.backend).to_string(),
         raw_adapter_json,
 
-        // Captured from Cargo.lock at build time by build.rs — the ACTUAL
-        // resolved, pinned wgpu version.
+        // Captured from Cargo.toml at build time by build.rs — the exact
+        // `=`-pinned wgpu version.
         wgpu_version: env!("WGPU_VERSION").to_string(),
 
         os_name: System::name().unwrap_or_else(|| "unknown".to_string()),

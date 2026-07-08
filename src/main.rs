@@ -1,38 +1,12 @@
-//! gpu-probe — a GPU matrix-multiply benchmark and measurement instrument.
+//! gpu-probe CLI — a thin front-end over the `gpu_probe` library.
 //!
-//! Flow: collect hardware → run benchmark → verify → store row → print summary.
-//! Correctness and completeness of the recorded metadata matter more than raw
-//! speed: every knob that affects the result is recorded in the row so two runs
-//! can be judged comparable (or not) after the fact.
-
-mod benchmark;
-mod hardware;
-mod store;
-mod verify;
+//! Responsibilities kept here: argument parsing and all human-facing I/O
+//! (progress, warnings, the result summary, exit code). The measurement logic
+//! lives in the library so it can be reused without this shell.
 
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-/// All benchmark parameters, every one of which is recorded in the result row.
-pub struct Config {
-    pub n: u32,
-    pub seed: u64,
-    pub warmup_iters: u32,
-    pub timed_iters: u32,
-    pub db_path: String,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Config {
-            n: 1024,                       // multiple of the 16 tile size
-            seed: 0x0123_4567_89AB_CDEF,   // fixed default => reproducible
-            warmup_iters: 3,
-            timed_iters: 20,
-            db_path: "./gpu-probe.db".to_string(),
-        }
-    }
-}
+use gpu_probe::{run_probe, util, Config, Error, ProbeOutcome};
 
 const USAGE: &str = "\
 gpu-probe — GPU GEMM benchmark → SQLite
@@ -101,97 +75,41 @@ fn parse_u64(s: &str) -> Option<u64> {
     }
 }
 
-/// Validate/normalize N: must be a positive multiple of the tile size. If not,
-/// round UP to the next multiple of 16 (the tiled shader assumes N % 16 == 0).
-fn normalize_n(n: u32) -> u32 {
-    let tile = benchmark::TILE_SIZE;
-    if n == 0 {
-        return tile;
+/// Print everything the run produced, mirroring the library's collected output
+/// (enumerated adapters, warnings) plus a human-readable summary.
+fn report(outcome: &ProbeOutcome) {
+    let hw = &outcome.hardware;
+    let bench = &outcome.benchmark;
+    let cfg = &outcome.config;
+    let verification = &outcome.verification;
+
+    // Adapter enumeration (previously printed inside setup()).
+    eprintln!("Enumerated {} adapter(s):", outcome.enumerated_adapters.len());
+    for line in &outcome.enumerated_adapters {
+        eprintln!("  - {line}");
     }
-    if n % tile == 0 {
-        n
-    } else {
-        let adjusted = ((n / tile) + 1) * tile;
-        println!("Adjusted N from {n} to {adjusted} (must be a multiple of {tile}).");
-        adjusted
-    }
-}
 
-/// UTC timestamp as `YYYY-MM-DDTHH:MM:SSZ` without pulling in chrono. Uses
-/// Howard Hinnant's civil-from-days algorithm.
-fn utc_now() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0) as i64;
-
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-
-    // days since 1970-01-01 -> civil (y, m, d)
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if m <= 2 { y + 1 } else { y };
-
-    format!("{year:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
-}
-
-fn run() -> Result<bool, String> {
-    let mut cfg = parse_args()?;
-    cfg.n = normalize_n(cfg.n);
-
-    // Hash the exact shipped-and-run shader text (stable FNV-1a, hex).
-    let shader_hash = format!("{:016x}", benchmark::fnv1a_64(benchmark::GEMM_WGSL.as_bytes()));
-
-    // 1. GPU setup (also rejects a CPU/software adapter).
-    let ctx = benchmark::setup()?;
-
-    // 2. Host + adapter metadata stamp.
-    let hw = hardware::collect(&ctx.adapter_info);
-
-    // 3. Benchmark.
     println!(
         "Running GEMM: N={} seed=0x{:016x} warmup={} timed={} on {} [{}]",
         cfg.n, cfg.seed, cfg.warmup_iters, cfg.timed_iters, hw.gpu_name, hw.backend
     );
-    let bench = benchmark::run(&ctx, &cfg);
 
-    // 4. Verify a seeded sample against a CPU recomputation.
-    let verification = verify::verify(cfg.n, &bench.a, &bench.b, &bench.c);
+    // Warnings collected during the timed run.
+    for w in &bench.warnings {
+        eprintln!("warning: {w}");
+    }
     if !verification.passed {
         eprintln!(
             "WARNING: verification FAILED — max relative error {:.3e} exceeds tolerance {:.1e}. \
              Storing row marked failed.",
             verification.max_rel_error,
-            verify::REL_TOLERANCE
+            gpu_probe::verify::REL_TOLERANCE
         );
     }
 
-    // 5. Store the fully-stamped row.
-    let timestamp_utc = utc_now();
-    let conn = store::open(&cfg.db_path).map_err(|e| format!("failed to open DB: {e}"))?;
-    let row_id = store::insert(
-        &conn,
-        &cfg,
-        &hw,
-        &bench,
-        &verification,
-        &shader_hash,
-        &timestamp_utc,
-    )
-    .map_err(|e| format!("failed to insert row: {e}"))?;
-
-    // 6. Human-readable summary.
     println!();
-    println!("================ gpu-probe result (row {row_id}) ================");
+    let row_label = row_label(outcome);
+    println!("================ gpu-probe result{row_label} ================");
     println!("GPU            : {} [{}]", hw.gpu_name, hw.gpu_device_type);
     println!("Backend        : {}", hw.backend);
     println!("Timing method  : {}", bench.timing_method);
@@ -210,13 +128,47 @@ fn run() -> Result<bool, String> {
         verification.max_rel_error
     );
     println!("Run valid      : {}", bench.run_valid);
-    println!("Shader hash    : {shader_hash}");
+    println!("Shader hash    : {}", outcome.shader_hash);
     println!("Fingerprint    : {}", bench.input_fingerprint);
-    println!("DB             : {} (row {row_id})", cfg.db_path);
+    #[cfg(feature = "sqlite")]
+    if let Some(id) = outcome.row_id {
+        println!("DB             : {} (row {id})", cfg.db_path);
+    }
     println!("================================================================");
+}
+
+#[cfg(feature = "sqlite")]
+fn row_label(outcome: &ProbeOutcome) -> String {
+    match outcome.row_id {
+        Some(id) => format!(" (row {id})"),
+        None => String::new(),
+    }
+}
+
+#[cfg(not(feature = "sqlite"))]
+fn row_label(_outcome: &ProbeOutcome) -> String {
+    String::new()
+}
+
+fn run() -> Result<bool, Error> {
+    let mut cfg = parse_args().map_err(Error::Device)?;
+
+    // Normalize here so we can tell the user we adjusted their N; run_probe
+    // normalizes again idempotently.
+    let normalized = util::normalize_n(cfg.n);
+    if normalized != cfg.n {
+        println!(
+            "Adjusted N from {} to {normalized} (must be a multiple of 16).",
+            cfg.n
+        );
+        cfg.n = normalized;
+    }
+
+    let outcome = run_probe(&cfg)?;
+    report(&outcome);
 
     // Exit non-zero if verification failed or the run was invalid.
-    Ok(verification.passed && bench.run_valid)
+    Ok(outcome.verification.passed && outcome.benchmark.run_valid)
 }
 
 fn main() -> ExitCode {

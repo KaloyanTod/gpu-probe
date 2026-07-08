@@ -2,11 +2,42 @@
 name = "gpu-probe"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.82"
 description = "GPU matrix-multiply benchmark that records fully-stamped, reproducible results into SQLite."
+# TODO: point at the real repository before publishing.
+repository = "https://github.com/kaloyan-todorov/gpu-probe"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["gpu", "benchmark", "gemm", "wgpu"]
+categories = ["hardware-support", "command-line-utilities"]
+authors = ["Kaloyan Todorov"]
+# Ensure the WGSL shader (pulled via include_str!) and license files ship in the
+# published package; Cargo.lock is intentionally NOT relied on at build time
+# (see build.rs).
+include = [
+    "src/**/*.rs",
+    "src/shaders/*.wgsl",
+    "build.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE-*",
+]
+
+[lib]
+name = "gpu_probe"
+path = "src/lib.rs"
 
 [[bin]]
 name = "gpu-probe"
 path = "src/main.rs"
+# The CLI always stores results, so it needs the SQLite layer.
+required-features = ["sqlite"]
+
+[features]
+default = ["sqlite"]
+# The SQLite storage layer (the `store` module + the DB error variant). Turn it
+# off to use the benchmark as a pure library with no SQLite dependency.
+sqlite = ["dep:rusqlite"]
 
 [dependencies]
 # GPU compute. Pinned EXACTLY (`=`) so the recorded wgpu_version can never drift
@@ -15,11 +46,14 @@ wgpu = { version = "=30.0.0", features = ["serde"] }
 # Block on wgpu's async calls without pulling in tokio.
 pollster = "=0.4.0"
 # SQLite. "bundled" compiles SQLite in-tree so no system sqlite is required.
-rusqlite = { version = "=0.40.1", features = ["bundled"] }
+# Optional: only pulled in by the `sqlite` feature (see [features]).
+rusqlite = { version = "=0.40.1", features = ["bundled"], optional = true }
 # Host metadata: CPU model, cores, RAM, OS.
 sysinfo = "=0.39.5"
-# Structured metadata + JSON columns.
+# Structured metadata + JSON columns (the full raw adapter dump is always kept).
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.145"
 # Cast f32 buffers to &[u8] for GPU upload and read u64 timestamp ticks back.
 bytemuck = "=1.25.0"
+# Ergonomic error enum for the public library API.
+thiserror = "2"
