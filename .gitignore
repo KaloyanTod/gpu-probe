@@ -1,0 +1,5 @@
+/target
+# Local results database(s) produced by running the tool.
+*.db
+*.db-journal
+*.db-wal

@@ -1,0 +1,25 @@
+[package]
+name = "gpu-probe"
+version = "0.1.0"
+edition = "2021"
+description = "GPU matrix-multiply benchmark that records fully-stamped, reproducible results into SQLite."
+
+[[bin]]
+name = "gpu-probe"
+path = "src/main.rs"
+
+[dependencies]
+# GPU compute. Pinned EXACTLY (`=`) so the recorded wgpu_version can never drift
+# silently under us — an uncontrolled wgpu version would make results incomparable.
+wgpu = { version = "=30.0.0", features = ["serde"] }
+# Block on wgpu's async calls without pulling in tokio.
+pollster = "=0.4.0"
+# SQLite. "bundled" compiles SQLite in-tree so no system sqlite is required.
+rusqlite = { version = "=0.40.1", features = ["bundled"] }
+# Host metadata: CPU model, cores, RAM, OS.
+sysinfo = "=0.39.5"
+# Structured metadata + JSON columns.
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.145"
+# Cast f32 buffers to &[u8] for GPU upload and read u64 timestamp ticks back.
+bytemuck = "=1.25.0"
