@@ -1,8 +1,8 @@
 [package]
 name = "gpu-probe"
-version = "0.1.0"
-edition = "2021"
-rust-version = "1.82"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.96"
 description = "GPU matrix-multiply benchmark that records fully-stamped, reproducible results into SQLite."
 # TODO: point at the real repository before publishing.
 repository = "https://github.com/kaloyan-todorov/gpu-probe"
