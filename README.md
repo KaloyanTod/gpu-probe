@@ -133,8 +133,8 @@ src/
   benchmark.rs  wgpu setup, deterministic inputs, tiled GEMM dispatch, timing
   verify.rs     CPU reference check on a seeded sample
   store.rs      SQLite schema + insert
-  shaders/
-    gemm.wgsl   tiled 16x16 f32 GEMM compute shader
+shaders/
+  gemm.wgsl     tiled 16x16 f32 GEMM compute shader
 build.rs        captures the resolved (pinned) wgpu version at build time
 ```
 

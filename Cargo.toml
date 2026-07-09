@@ -16,7 +16,7 @@ authors = ["Kaloyan Todorov"]
 # (see build.rs).
 include = [
     "src/**/*.rs",
-    "src/shaders/*.wgsl",
+    "shaders/*.wgsl",
     "build.rs",
     "Cargo.toml",
     "README.md",

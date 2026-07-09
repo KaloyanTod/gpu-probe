@@ -16,7 +16,7 @@ use crate::Config;
 /// The tiled GEMM shader, compiled into the binary. include_str! guarantees the
 /// shader that RAN is exactly the text we hash — no drift between the shipped
 /// file and the recorded shader_hash.
-pub const GEMM_WGSL: &str = include_str!("shaders/gemm.wgsl");
+pub const GEMM_WGSL: &str = include_str!("../shaders/gemm.wgsl");
 
 /// Tile / workgroup dimension. MUST match `@workgroup_size` and `TILE` in the
 /// shader.
