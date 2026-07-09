@@ -1,7 +1,7 @@
 
 # gpu-probe
 
-<img width="800" height="800" alt="ChatGPT Image Jul 8, 2026, 08_06_49 PM" src="https://github.com/user-attachments/assets/4a9b5914-c93f-4d8f-8a3d-85fb249ec695" />
+<img width="800" height="600" alt="ChatGPT Image Jul 8, 2026, 08_06_49 PM" src="https://github.com/user-attachments/assets/4a9b5914-c93f-4d8f-8a3d-85fb249ec695" />
 
 
 A small, reproducible GPU **matrix-multiply benchmark** and measurement
